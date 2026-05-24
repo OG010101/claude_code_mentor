@@ -1,6 +1,9 @@
 import asyncio
+import base64
+import json
 import logging
 import os
+import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
@@ -17,13 +20,15 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 if not BOT_TOKEN:
     raise SystemExit("Missing BOT_TOKEN")
 if not ANTHROPIC_API_KEY:
     raise SystemExit("Missing ANTHROPIC_API_KEY")
-MODEL = "claude-sonnet-4-6"  # Sonnet: отличное качество + разумная цена. Заменить на claude-opus-4-7 для максимума.
-MAX_HISTORY = 30  # максимум сообщений в истории на пользователя
+
+MODEL = "claude-sonnet-4-6"
+MAX_HISTORY = 20
 MAX_TOKENS = 4096
 
 bot = Bot(token=BOT_TOKEN)
@@ -31,26 +36,23 @@ dp = Dispatcher()
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 executor = ThreadPoolExecutor(max_workers=8)
 
-# История диалогов: {user_id: [{"role": ..., "content": ...}]}
 history: dict[int, list] = defaultdict(list)
 
 
 def trim_history(user_id: int) -> None:
-    """Оставляем только последние MAX_HISTORY сообщений."""
     if len(history[user_id]) > MAX_HISTORY:
         history[user_id] = history[user_id][-MAX_HISTORY:]
 
 
-def ask_claude_sync(user_id: int, user_text: str) -> str:
-    """Синхронный запрос в Claude с историей и инструментами (для ThreadPoolExecutor)."""
-    history[user_id].append({"role": "user", "content": user_text})
+def _run_claude_loop(user_id: int, user_content) -> str:
+    """Агентный цикл Claude — принимает текст или список блоков контента (для изображений)."""
+    history[user_id].append({"role": "user", "content": user_content})
     trim_history(user_id)
 
     messages = list(history[user_id])
     response = None
 
-    # Агентный цикл: Claude может вызывать инструменты несколько раз
-    for _ in range(10):  # максимум 10 итераций tool use
+    for _ in range(10):
         response = client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
@@ -59,48 +61,86 @@ def ask_claude_sync(user_id: int, user_text: str) -> str:
             messages=messages,
         )
 
-        # Если Claude закончил — вернуть ответ
         if response.stop_reason == "end_turn":
             history[user_id].append({"role": "assistant", "content": response.content})
             return _extract_text(response)
 
-        # Claude хочет вызвать инструменты
         if response.stop_reason == "tool_use":
             messages.append({"role": "assistant", "content": response.content})
-
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
-                    logger.info(f"Tool call: {block.name} | input: {block.input}")
+                    logger.info(f"Tool: {block.name} | {block.input}")
                     result = execute_tool(block.name, block.input)
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
                         "content": result,
                     })
-
             messages.append({"role": "user", "content": tool_results})
         else:
             break
 
-    # Вернуть последний доступный ответ
     if response is not None:
         history[user_id].append({"role": "assistant", "content": response.content})
         return _extract_text(response)
     return "Не удалось получить ответ."
 
 
+def ask_claude_sync(user_id: int, text: str) -> str:
+    return _run_claude_loop(user_id, text)
+
+
+def ask_claude_with_image_sync(user_id: int, image_bytes: bytes, caption: str) -> str:
+    text = caption.strip() if caption else "Посмотри на этот скриншот. Что здесь происходит? Если видишь ошибку — объясни простыми словами что это и как исправить."
+    content = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": base64.b64encode(image_bytes).decode(),
+            },
+        },
+        {"type": "text", "text": text},
+    ]
+    return _run_claude_loop(user_id, content)
+
+
+def transcribe_voice_sync(audio_bytes: bytes) -> str:
+    """Транскрибирует голосовое сообщение через Groq Whisper API."""
+    boundary = "------GroqBoundary"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="model"\r\n\r\n'
+        f"whisper-large-v3-turbo\r\n"
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="language"\r\n\r\n'
+        f"ru\r\n"
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="voice.ogg"\r\n'
+        f"Content-Type: audio/ogg\r\n\r\n"
+    ).encode() + audio_bytes + f"\r\n--{boundary}--\r\n".encode()
+
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/audio/transcriptions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read()).get("text", "")
+
+
 def _extract_text(response) -> str:
-    """Извлечь текстовый контент из ответа Claude."""
-    parts = []
-    for block in response.content:
-        if hasattr(block, "text"):
-            parts.append(block.text)
+    parts = [block.text for block in response.content if hasattr(block, "text")]
     return "\n".join(parts) if parts else "Не получил ответ от Claude."
 
 
 def split_message(text: str, max_len: int = 4000) -> list[str]:
-    """Разбить длинный текст на части для Telegram."""
     if len(text) <= max_len:
         return [text]
     parts = []
@@ -116,6 +156,14 @@ def split_message(text: str, max_len: int = 4000) -> list[str]:
     return parts
 
 
+async def _send_response(message: Message, text: str) -> None:
+    for part in split_message(text):
+        try:
+            await message.answer(part, parse_mode="Markdown")
+        except Exception:
+            await message.answer(part)
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     await message.answer(
@@ -125,8 +173,7 @@ async def cmd_start(message: Message) -> None:
         "• ⚡ Создавать скиллы, хуки, MCP-серверы\n"
         "• 🐙 Работать с GitHub и репозиториями\n"
         "• 🔍 Находить готовые решения и примеры\n\n"
-        "Просто задай любой вопрос!\n\n"
-        "Команды:\n"
+        "Можешь писать текстом, голосом или присылать скриншоты!\n\n"
         "/clear — сбросить историю диалога\n"
         "/help — что я умею"
     )
@@ -135,64 +182,85 @@ async def cmd_start(message: Message) -> None:
 @dp.message(Command("clear"))
 async def cmd_clear(message: Message) -> None:
     history[message.from_user.id].clear()
-    await message.answer("✅ История диалога сброшена. Начнём с чистого листа!")
+    await message.answer("✅ История сброшена. Начнём с чистого листа!")
 
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await message.answer(
         "🎓 <b>Что я умею:</b>\n\n"
-        "<b>Claude Code:</b>\n"
-        "• Все slash-команды и горячие клавиши\n"
-        "• Как создать скилл (/skill)\n"
-        "• Хуки — автоматизация действий\n"
-        "• MCP-серверы — подключение внешних сервисов\n"
-        "• CLAUDE.md — память проекта\n"
-        "• settings.json — настройки\n"
-        "• Субагенты и параллельная работа\n\n"
-        "<b>GitHub:</b>\n"
-        "• Основы git (commit, branch, merge)\n"
-        "• Pull Requests и ревью\n"
-        "• GitHub Actions (CI/CD)\n"
-        "• gh CLI — управление из терминала\n"
-        "• Поиск готовых решений\n\n"
-        "<b>Особенности:</b>\n"
-        "• Ищу актуальную информацию в интернете\n"
-        "• Нахожу примеры кода на GitHub\n"
-        "• Помню историю нашего разговора\n\n"
+        "💬 <b>Текст</b> — задавай любые вопросы\n"
+        "🎤 <b>Голос</b> — говори, я пойму\n"
+        "📸 <b>Фото/скриншот</b> — покажи ошибку, объясню\n\n"
+        "<b>Темы:</b>\n"
+        "• Claude Code — все команды, скиллы, хуки, MCP\n"
+        "• GitHub — git, PR, Actions, gh CLI\n"
+        "• Вайб-кодинг — как работать с AI как профи\n\n"
         "/clear — сбросить историю",
         parse_mode="HTML"
     )
 
 
 @dp.message(F.text)
-async def handle_message(message: Message) -> None:
+async def handle_text(message: Message) -> None:
     user_id = message.from_user.id
-    user_text = message.text.strip()
-
-    if not user_text:
+    text = message.text.strip()
+    if not text:
         return
-
-    # Показать статус "печатает"
     await bot.send_chat_action(message.chat.id, "typing")
-
     try:
         loop = asyncio.get_event_loop()
-        response_text = await loop.run_in_executor(
-            executor, ask_claude_sync, user_id, user_text
-        )
+        response = await loop.run_in_executor(executor, ask_claude_sync, user_id, text)
+        await _send_response(message, response)
     except Exception as e:
-        logger.error(f"Error for user {user_id}: {e}")
-        await message.answer(f"❌ Произошла ошибка: {e}")
-        return
+        logger.error(f"Text error {user_id}: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
 
-    # Отправить ответ (с разбивкой если длинный)
-    for part in split_message(response_text):
-        try:
-            await message.answer(part, parse_mode="Markdown")
-        except Exception:
-            # Если Markdown не работает — отправить как обычный текст
-            await message.answer(part)
+
+@dp.message(F.photo)
+async def handle_photo(message: Message) -> None:
+    user_id = message.from_user.id
+    await bot.send_chat_action(message.chat.id, "typing")
+    try:
+        file = await bot.get_file(message.photo[-1].file_id)
+        bio = await bot.download_file(file.file_path)
+        image_bytes = bio.read()
+        caption = message.caption or ""
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            executor, ask_claude_with_image_sync, user_id, image_bytes, caption
+        )
+        await _send_response(message, response)
+    except Exception as e:
+        logger.error(f"Photo error {user_id}: {e}")
+        await message.answer("❌ Не смог обработать фото. Попробуй ещё раз.")
+
+
+@dp.message(F.voice)
+async def handle_voice(message: Message) -> None:
+    user_id = message.from_user.id
+    if not GROQ_API_KEY:
+        await message.answer("🎤 Голосовые сообщения не настроены. Добавь GROQ_API_KEY в Railway.")
+        return
+    await bot.send_chat_action(message.chat.id, "typing")
+    try:
+        file = await bot.get_file(message.voice.file_id)
+        bio = await bot.download_file(file.file_path)
+        audio_bytes = bio.read()
+
+        loop = asyncio.get_event_loop()
+        text = await loop.run_in_executor(executor, transcribe_voice_sync, audio_bytes)
+
+        if not text:
+            await message.answer("Не смог разобрать речь. Попробуй ещё раз.")
+            return
+
+        await message.answer(f"🎤 _{text}_", parse_mode="Markdown")
+        response = await loop.run_in_executor(executor, ask_claude_sync, user_id, text)
+        await _send_response(message, response)
+    except Exception as e:
+        logger.error(f"Voice error {user_id}: {e}")
+        await message.answer("❌ Не смог обработать голосовое. Попробуй ещё раз.")
 
 
 async def main() -> None:

@@ -109,30 +109,49 @@ def ask_claude_with_image_sync(user_id: int, image_bytes: bytes, caption: str) -
 
 def transcribe_voice_sync(audio_bytes: bytes) -> str:
     """Транскрибирует голосовое сообщение через Groq Whisper API."""
-    boundary = "------GroqBoundary"
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="model"\r\n\r\n'
-        f"whisper-large-v3-turbo\r\n"
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="language"\r\n\r\n'
-        f"ru\r\n"
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="file"; filename="voice.ogg"\r\n'
-        f"Content-Type: audio/ogg\r\n\r\n"
-    ).encode() + audio_bytes + f"\r\n--{boundary}--\r\n".encode()
+    import http.client, ssl
 
-    req = urllib.request.Request(
-        "https://api.groq.com/openai/v1/audio/transcriptions",
-        data=body,
+    boundary = "Boundary7MA4YWxkTrZu0gW"
+
+    def field(name: str, value: str) -> bytes:
+        return (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+            f"{value}\r\n"
+        ).encode()
+
+    def file_field(name: str, filename: str, data: bytes, ctype: str) -> bytes:
+        header = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+            f"Content-Type: {ctype}\r\n\r\n"
+        ).encode()
+        return header + data + b"\r\n"
+
+    body = (
+        field("model", "whisper-large-v3-turbo")
+        + field("language", "ru")
+        + file_field("file", "voice.ogg", audio_bytes, "audio/ogg")
+        + f"--{boundary}--\r\n".encode()
+    )
+
+    ctx = ssl.create_default_context()
+    conn = http.client.HTTPSConnection("api.groq.com", context=ctx, timeout=30)
+    conn.request(
+        "POST",
+        "/openai/v1/audio/transcriptions",
+        body=body,
         headers={
             "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": f"multipart/form-data; boundary={boundary}",
         },
-        method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read()).get("text", "")
+    resp = conn.getresponse()
+    resp_body = resp.read()
+    if resp.status != 200:
+        logger.error(f"Groq error {resp.status}: {resp_body.decode()}")
+        return ""
+    return json.loads(resp_body).get("text", "")
 
 
 def _extract_text(response) -> str:

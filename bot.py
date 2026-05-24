@@ -1,9 +1,7 @@
 import asyncio
 import base64
-import json
 import logging
 import os
-import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
@@ -109,49 +107,18 @@ def ask_claude_with_image_sync(user_id: int, image_bytes: bytes, caption: str) -
 
 def transcribe_voice_sync(audio_bytes: bytes) -> str:
     """Транскрибирует голосовое сообщение через Groq Whisper API."""
-    import http.client, ssl
+    import io
+    from groq import Groq
 
-    boundary = "Boundary7MA4YWxkTrZu0gW"
-
-    def field(name: str, value: str) -> bytes:
-        return (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
-            f"{value}\r\n"
-        ).encode()
-
-    def file_field(name: str, filename: str, data: bytes, ctype: str) -> bytes:
-        header = (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
-            f"Content-Type: {ctype}\r\n\r\n"
-        ).encode()
-        return header + data + b"\r\n"
-
-    body = (
-        field("model", "whisper-large-v3-turbo")
-        + field("language", "ru")
-        + file_field("file", "voice.ogg", audio_bytes, "audio/ogg")
-        + f"--{boundary}--\r\n".encode()
+    groq_client = Groq(api_key=GROQ_API_KEY)
+    audio_file = io.BytesIO(audio_bytes)
+    audio_file.name = "voice.ogg"
+    transcription = groq_client.audio.transcriptions.create(
+        file=audio_file,
+        model="whisper-large-v3-turbo",
+        language="ru",
     )
-
-    ctx = ssl.create_default_context()
-    conn = http.client.HTTPSConnection("api.groq.com", context=ctx, timeout=30)
-    conn.request(
-        "POST",
-        "/openai/v1/audio/transcriptions",
-        body=body,
-        headers={
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
-    )
-    resp = conn.getresponse()
-    resp_body = resp.read()
-    if resp.status != 200:
-        logger.error(f"Groq error {resp.status}: {resp_body.decode()}")
-        return ""
-    return json.loads(resp_body).get("text", "")
+    return transcription.text
 
 
 def _extract_text(response) -> str:

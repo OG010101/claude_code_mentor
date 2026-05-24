@@ -15,14 +15,10 @@ from tools import TOOLS, execute_tool
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-logger.info("=== Bot starting ===")
-logger.info(f"Available env vars: {[k for k in os.environ if not k.startswith('RAILWAY')]}")
-
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
 if not BOT_TOKEN:
-    logger.error("BOT_TOKEN not found! All env keys: %s", list(os.environ.keys()))
     raise SystemExit("Missing BOT_TOKEN")
 if not ANTHROPIC_API_KEY:
     raise SystemExit("Missing ANTHROPIC_API_KEY")

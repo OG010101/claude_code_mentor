@@ -106,12 +106,13 @@ async def _send_paged(target: Message, text: str) -> None:
 
 # ── Claude loop ───────────────────────────────────────────────────────────────
 
-def _run_claude(user_id: int, user_content) -> str:
+def _run_claude(user_id: int, user_content, on_tool_use=None) -> str:
     db.append_message(user_id, "user", user_content)
     messages = db.load_history(user_id)
     profile = db.load_profile(user_id)
     system_prompt = get_system_prompt(profile)
     response = None
+    tool_notified = False
 
     for _ in range(10):
         response = client.messages.create(
@@ -132,6 +133,9 @@ def _run_claude(user_id: int, user_content) -> str:
             return text
 
         if response.stop_reason == "tool_use":
+            if not tool_notified and on_tool_use:
+                on_tool_use()
+                tool_notified = True
             messages.append({"role": "assistant", "content": response.content})
             tool_results = []
             for block in response.content:
@@ -157,18 +161,44 @@ def _extract(response) -> str:
     return "\n".join(parts) if parts else "Не получил ответ от Claude."
 
 
-def ask_sync(user_id: int, text: str) -> str:
-    return _run_claude(user_id, text)
+def ask_sync(user_id: int, text: str, on_tool_use=None) -> str:
+    return _run_claude(user_id, text, on_tool_use)
 
 
-def ask_image_sync(user_id: int, image_bytes: bytes, caption: str) -> str:
+def ask_image_sync(user_id: int, image_bytes: bytes, caption: str, on_tool_use=None) -> str:
     text = caption.strip() if caption else "Посмотри на этот скриншот. Что здесь происходит? Если видишь ошибку — объясни что это и как исправить."
     content = [
         {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                       "data": base64.b64encode(image_bytes).decode()}},
         {"type": "text", "text": text},
     ]
-    return _run_claude(user_id, content)
+    return _run_claude(user_id, content, on_tool_use)
+
+
+async def _run_with_status(target: Message, fn) -> str:
+    """Запускает fn(on_tool_use) в executor, показывает 🔍 при поиске."""
+    loop = asyncio.get_event_loop()
+    status_ref: list = [None]
+
+    def on_tool_use():
+        future = asyncio.run_coroutine_threadsafe(
+            target.answer("🔍 Ищу актуальную информацию..."),
+            loop,
+        )
+        try:
+            status_ref[0] = future.result(timeout=5)
+        except Exception:
+            pass
+
+    resp = await loop.run_in_executor(executor, fn, on_tool_use)
+
+    if status_ref[0]:
+        try:
+            await status_ref[0].delete()
+        except Exception:
+            pass
+
+    return resp
 
 
 def transcribe_sync(audio_bytes: bytes) -> str:
@@ -244,9 +274,8 @@ async def cb_yn(call: CallbackQuery) -> None:
     await call.answer()
     await bot.send_chat_action(call.message.chat.id, "typing")
     try:
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(executor, ask_sync, uid, text)
-        await _send_paged(call.message, response)
+        resp = await _run_with_status(call.message, lambda cb: ask_sync(uid, text, cb))
+        await _send_paged(call.message, resp)
     except Exception as e:
         logger.error(f"YN error {uid}: {e}")
         await call.message.answer(f"❌ Ошибка: {e}")
@@ -356,8 +385,9 @@ async def handle_text(message: Message) -> None:
             pass
         await bot.send_chat_action(message.chat.id, "typing")
         try:
-            loop = asyncio.get_event_loop()
-            resp = await loop.run_in_executor(executor, ask_sync, uid, "Мой профиль заполнен. С чего начнём?")
+            resp = await _run_with_status(
+                message, lambda cb: ask_sync(uid, "Мой профиль заполнен. С чего начнём?", cb)
+            )
             await _send_paged(message, resp)
         except Exception as e:
             logger.error(f"Setup start error {uid}: {e}")
@@ -365,8 +395,7 @@ async def handle_text(message: Message) -> None:
 
     await bot.send_chat_action(message.chat.id, "typing")
     try:
-        loop = asyncio.get_event_loop()
-        resp = await loop.run_in_executor(executor, ask_sync, uid, text)
+        resp = await _run_with_status(message, lambda cb: ask_sync(uid, text, cb))
         await _send_paged(message, resp)
     except Exception as e:
         logger.error(f"Text error {uid}: {e}")
@@ -380,9 +409,11 @@ async def handle_photo(message: Message) -> None:
     try:
         file = await bot.get_file(message.photo[-1].file_id)
         bio = await bot.download_file(file.file_path)
+        image_bytes = bio.read()
         caption = message.caption or ""
-        loop = asyncio.get_event_loop()
-        resp = await loop.run_in_executor(executor, ask_image_sync, uid, bio.read(), caption)
+        resp = await _run_with_status(
+            message, lambda cb: ask_image_sync(uid, image_bytes, caption, cb)
+        )
         await _send_paged(message, resp)
     except Exception as e:
         logger.error(f"Photo error {uid}: {e}")
@@ -405,7 +436,7 @@ async def handle_voice(message: Message) -> None:
             await message.answer("Не смог разобрать речь. Попробуй ещё раз.")
             return
         await message.answer(f"🎤 _{text}_", parse_mode="Markdown")
-        resp = await loop.run_in_executor(executor, ask_sync, uid, text)
+        resp = await _run_with_status(message, lambda cb: ask_sync(uid, text, cb))
         await _send_paged(message, resp)
     except Exception as e:
         logger.error(f"Voice error {uid}: {e}")

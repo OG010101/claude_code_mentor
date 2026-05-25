@@ -34,11 +34,16 @@ def init_db() -> None:
                 level     TEXT,
                 os        TEXT,
                 goal      TEXT,
+                name      TEXT,
                 setup_done INTEGER DEFAULT 0,
                 topics    TEXT DEFAULT '[]',
                 updated_at TEXT
             )
         """)
+        try:
+            c.execute("ALTER TABLE profiles ADD COLUMN name TEXT")
+        except Exception:
+            pass
         c.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,13 +87,14 @@ def save_profile(user_id: int, **kwargs) -> None:
     with _conn() as c:
         c.execute(
             """INSERT OR REPLACE INTO profiles
-               (user_id, level, os, goal, setup_done, topics, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (user_id, level, os, goal, name, setup_done, topics, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 user_id,
                 profile.get("level"),
                 profile.get("os"),
                 profile.get("goal"),
+                profile.get("name"),
                 int(profile.get("setup_done", False)),
                 topics,
                 datetime.now().isoformat(),

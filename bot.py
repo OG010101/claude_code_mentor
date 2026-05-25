@@ -85,12 +85,27 @@ def needs_yn(text: str) -> bool:
     ])
 
 
+def action_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔁 Объясни иначе", callback_data="action_again"),
+            InlineKeyboardButton(text="✅ Понял, дальше", callback_data="action_next"),
+        ]
+    ])
+
+
+def last_part_kb(text: str) -> InlineKeyboardMarkup | None:
+    if needs_yn(text):
+        return make_kb(("Да, попробуем 👍", "yn_yes"), ("Нет, давай дальше ➡️", "yn_no"))
+    return action_kb()
+
+
 async def _send_paged(target: Message, text: str) -> None:
     user_id = target.from_user.id
     parts = split_smart(text)
 
     if len(parts) == 1:
-        kb = make_kb(("Да, попробуем 👍", "yn_yes"), ("Нет, давай дальше ➡️", "yn_no")) if needs_yn(parts[0]) else None
+        kb = last_part_kb(parts[0])
         try:
             await target.answer(parts[0], parse_mode="Markdown", reply_markup=kb)
         except Exception:
@@ -253,15 +268,10 @@ async def cb_level(call: CallbackQuery) -> None:
 async def cb_os(call: CallbackQuery) -> None:
     os_map = {"setup_os_mac": "Mac", "setup_os_windows": "Windows", "setup_os_linux": "Linux"}
     db.save_profile(call.from_user.id, os=os_map[call.data])
-    setup_state[call.from_user.id] = "awaiting_goal"
+    setup_state[call.from_user.id] = "awaiting_name"
     await call.message.edit_reply_markup(reply_markup=None)
     await call.answer()
-    await call.message.answer(
-        "Почти! *Последний вопрос:*\n\n"
-        "Чего хочешь достичь с Claude Code? Пару слов.\n\n"
-        "_Например: «автоматизировать рутину» или «учусь программировать с нуля»_",
-        parse_mode="Markdown",
-    )
+    await call.message.answer("Как тебя зовут?")
 
 
 # ── Handlers: buttons ─────────────────────────────────────────────────────────
@@ -281,6 +291,25 @@ async def cb_yn(call: CallbackQuery) -> None:
         await call.message.answer(f"❌ Ошибка: {e}")
 
 
+@dp.callback_query(F.data.in_({"action_again", "action_next"}))
+async def cb_action(call: CallbackQuery) -> None:
+    uid = call.from_user.id
+    text = (
+        "Объясни это иначе — другими словами или через другой пример из жизни"
+        if call.data == "action_again"
+        else "Понял. Что изучаем дальше?"
+    )
+    await call.message.edit_reply_markup(reply_markup=None)
+    await call.answer()
+    await bot.send_chat_action(call.message.chat.id, "typing")
+    try:
+        resp = await _run_with_status(call.message, lambda cb: ask_sync(uid, text, cb))
+        await _send_paged(call.message, resp)
+    except Exception as e:
+        logger.error(f"Action error {uid}: {e}")
+        await call.message.answer(f"❌ Ошибка: {e}")
+
+
 @dp.callback_query(F.data == "next_part")
 async def cb_next(call: CallbackQuery) -> None:
     uid = call.from_user.id
@@ -296,10 +325,8 @@ async def cb_next(call: CallbackQuery) -> None:
 
     if not is_last:
         kb = make_kb(("Дальше ➡️", "next_part"))
-    elif needs_yn(part):
-        kb = make_kb(("Да, попробуем 👍", "yn_yes"), ("Нет, давай дальше ➡️", "yn_no"))
     else:
-        kb = None
+        kb = last_part_kb(part)
 
     try:
         await call.message.answer(part, parse_mode="Markdown", reply_markup=kb)
@@ -369,16 +396,29 @@ async def handle_text(message: Message) -> None:
     if not text:
         return
 
+    if setup_state.get(uid) == "awaiting_name":
+        setup_state[uid] = "awaiting_goal"
+        db.save_profile(uid, name=text)
+        await message.answer(
+            f"Приятно познакомиться, *{text}*! 👋\n\n"
+            "И последнее — чего хочешь достичь с Claude Code? Пару слов.\n\n"
+            "_Например: «автоматизировать рутину» или «учусь программировать с нуля»_",
+            parse_mode="Markdown",
+        )
+        return
+
     if setup_state.get(uid) == "awaiting_goal":
         setup_state.pop(uid)
         db.save_profile(uid, goal=text, setup_done=True)
         profile = db.load_profile(uid)
         level_label = "новичок" if profile.get("level") == "beginner" else "есть опыт"
+        name = profile.get("name", "")
+        greeting = f"Всё готово, {name}! 🚀" if name else "Всё готово! 🚀"
         try:
             await message.answer(
                 f"*Профиль сохранён* ✅\n\n"
                 f"Уровень: {level_label} | ОС: {profile.get('os')} | Цель: {text}\n\n"
-                "Поехали! 🚀",
+                f"{greeting}",
                 parse_mode="Markdown",
             )
         except Exception:

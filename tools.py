@@ -7,11 +7,7 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
 
-def search_web(query: str) -> str:
-    """Поиск актуальной информации через Tavily."""
-    if not TAVILY_API_KEY:
-        return "Поиск недоступен: нет TAVILY_API_KEY"
-
+def _search_tavily(query: str) -> str:
     url = "https://api.tavily.com/search"
     payload = json.dumps({
         "api_key": TAVILY_API_KEY,
@@ -20,29 +16,39 @@ def search_web(query: str) -> str:
         "max_results": 5,
         "include_answer": True,
     }).encode()
-
     req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+        url, data=payload,
+        headers={"Content-Type": "application/json"}, method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read())
+    parts = []
+    if data.get("answer"):
+        parts.append(f"**Краткий ответ:** {data['answer']}\n")
+    for r in data.get("results", [])[:4]:
+        content = r.get("content", "")[:400]
+        parts.append(f"**{r.get('title','')}**\n{content}\nИсточник: {r.get('url','')}")
+    return "\n\n".join(parts) if parts else "Ничего не найдено"
 
-        parts = []
-        if data.get("answer"):
-            parts.append(f"**Краткий ответ:** {data['answer']}\n")
 
-        for r in data.get("results", [])[:4]:
+def _search_ddg(query: str) -> str:
+    from duckduckgo_search import DDGS
+    parts = []
+    with DDGS() as ddgs:
+        for r in ddgs.text(query, max_results=5):
             title = r.get("title", "")
-            url_r = r.get("url", "")
-            content = r.get("content", "")[:400]
-            parts.append(f"**{title}**\n{content}\nИсточник: {url_r}")
+            body = r.get("body", "")[:400]
+            href = r.get("href", "")
+            parts.append(f"**{title}**\n{body}\nИсточник: {href}")
+    return "\n\n".join(parts) if parts else "Ничего не найдено"
 
-        return "\n\n".join(parts) if parts else "Ничего не найдено"
 
+def search_web(query: str) -> str:
+    """Поиск: Tavily если есть ключ, иначе DuckDuckGo."""
+    try:
+        if TAVILY_API_KEY:
+            return _search_tavily(query)
+        return _search_ddg(query)
     except Exception as e:
         return f"Ошибка поиска: {e}"
 

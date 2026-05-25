@@ -67,11 +67,6 @@ def _extract_tips(client: anthropic.Anthropic, query: str) -> list[str]:
 
 def run_update_sync(client: anthropic.Anthropic) -> int:
     """Полный цикл обновления. Вызывать через run_in_executor."""
-    from tools import TAVILY_API_KEY
-    if not TAVILY_API_KEY:
-        logger.warning("Knowledge update skipped: no TAVILY_API_KEY")
-        return 0
-
     logger.info("Knowledge update started")
     count = 0
 

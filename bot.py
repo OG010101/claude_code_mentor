@@ -378,17 +378,25 @@ async def cmd_update(message: Message) -> None:
     await message.answer("🔍 Ищу свежие инструменты и лайфхаки...")
     try:
         loop = asyncio.get_event_loop()
-        count = await loop.run_in_executor(executor, run_update_sync, client)
+        count = await asyncio.wait_for(
+            loop.run_in_executor(executor, run_update_sync, client),
+            timeout=90,
+        )
         if count == 0:
             await message.answer("Ничего нового не нашёл. Попробуй позже.")
             return
         fresh = db.get_recent_discoveries(limit=count)
         items = "\n".join(fresh)
-        await message.answer(
-            f"✅ *Нашёл {count} новых советов:*\n\n{items}\n\n"
-            f"_Всего в базе: {db.discoveries_count()}_",
-            parse_mode="Markdown",
-        )
+        try:
+            await message.answer(
+                f"✅ *Нашёл {count} новых советов:*\n\n{items}\n\n"
+                f"_Всего в базе: {db.discoveries_count()}_",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            await message.answer(f"✅ Нашёл {count} новых советов:\n\n{items}")
+    except asyncio.TimeoutError:
+        await message.answer("⏱ Поиск занял слишком много времени. Попробуй ещё раз позже.")
     except Exception as e:
         logger.error(f"Manual update error: {e}")
         await message.answer(f"❌ Ошибка: {e}")

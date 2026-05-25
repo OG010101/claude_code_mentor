@@ -34,7 +34,7 @@ def _search_tavily(query: str) -> str:
 def _search_ddg(query: str) -> str:
     from duckduckgo_search import DDGS
     parts = []
-    with DDGS() as ddgs:
+    with DDGS(timeout=8) as ddgs:
         for r in ddgs.text(query, max_results=5):
             title = r.get("title", "")
             body = r.get("body", "")[:400]

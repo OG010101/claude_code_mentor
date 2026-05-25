@@ -71,12 +71,15 @@ def run_update_sync(client: anthropic.Anthropic) -> int:
     count = 0
 
     for query in SEARCH_QUERIES:
-        tips = _extract_tips(client, query)
-        for tip in tips:
-            if tip and len(tip) > 10:
-                db.add_discovery(tip, source=query)
-                count += 1
-        time.sleep(0.5)  # не спамить Tavily
+        try:
+            tips = _extract_tips(client, query)
+            for tip in tips:
+                if tip and len(tip) > 10:
+                    db.add_discovery(tip, source=query)
+                    count += 1
+        except Exception as e:
+            logger.warning(f"Skipping query '{query}': {e}")
+        time.sleep(0.5)
 
     db.trim_discoveries(keep=40)
     logger.info(f"Knowledge update complete: {count} new tips")

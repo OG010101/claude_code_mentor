@@ -1,4 +1,5 @@
 import os
+import db
 
 
 def load_knowledge() -> str:
@@ -147,7 +148,21 @@ def get_system_prompt(profile: dict) -> str:
         if name else ""
     )
 
-    return _BASE + f"""
+    discoveries = db.get_recent_discoveries(limit=12)
+    discoveries_section = ""
+    if discoveries:
+        items = "\n".join(discoveries)
+        discoveries_section = f"""
+
+---
+
+## СВЕЖИЕ НАХОДКИ (автообновление каждые 24ч)
+Актуальные инструменты и лайфхаки найденные в интернете — упоминай их когда тема разговора подходит:
+
+{items}
+"""
+
+    return _BASE + discoveries_section + f"""
 ---
 
 ## ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ

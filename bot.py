@@ -17,6 +17,7 @@ from aiogram.types import (
 )
 
 import db
+from knowledge_updater import run_update_sync
 from system_prompt import get_system_prompt
 from tools import TOOLS, execute_tool
 
@@ -372,6 +373,23 @@ async def cmd_progress(message: Message) -> None:
         await message.answer("\n".join(lines))
 
 
+@dp.message(Command("update"))
+async def cmd_update(message: Message) -> None:
+    await message.answer("🔍 Ищу свежие инструменты и лайфхаки...")
+    try:
+        loop = asyncio.get_event_loop()
+        count = await loop.run_in_executor(executor, run_update_sync, client)
+        total = db.discoveries_count()
+        await message.answer(
+            f"✅ Готово! Нашёл *{count}* новых советов.\n"
+            f"Всего в базе: {total} находок.",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.error(f"Manual update error: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
+
 @dp.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await message.answer(
@@ -381,6 +399,7 @@ async def cmd_help(message: Message) -> None:
         "📸 *Фото/скриншот* — покажи ошибку, объясню\n\n"
         "*Команды:*\n"
         "/progress — твой прогресс по курсу\n"
+        "/update — найти свежие инструменты и лайфхаки\n"
         "/clear — сбросить историю диалога\n"
         "/start — начать заново и обновить профиль",
         parse_mode="Markdown",
@@ -483,8 +502,22 @@ async def handle_voice(message: Message) -> None:
         await message.answer("❌ Не смог обработать голосовое. Попробуй ещё раз.")
 
 
+async def _knowledge_update_loop() -> None:
+    """Auto-updates knowledge base every 24 hours."""
+    await asyncio.sleep(30)  # дать боту запуститься
+    while True:
+        try:
+            loop = asyncio.get_event_loop()
+            count = await loop.run_in_executor(executor, run_update_sync, client)
+            logger.info(f"Auto knowledge update: {count} new tips")
+        except Exception as e:
+            logger.error(f"Auto update error: {e}")
+        await asyncio.sleep(24 * 60 * 60)
+
+
 async def main() -> None:
     db.init_db()
+    asyncio.create_task(_knowledge_update_loop())
     logger.info("Starting Claude Code Mentor bot...")
     await dp.start_polling(bot)
 

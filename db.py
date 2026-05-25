@@ -54,6 +54,14 @@ def init_db() -> None:
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_msg_user ON messages(user_id, id)")
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS discoveries (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                content    TEXT NOT NULL,
+                source     TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
     logger.info(f"DB ready at {DB_PATH}")
 
 
@@ -140,3 +148,36 @@ def append_message(user_id: int, role: str, content) -> None:
 def clear_history(user_id: int) -> None:
     with _conn() as c:
         c.execute("DELETE FROM messages WHERE user_id=?", (user_id,))
+
+
+# ── Discoveries ───────────────────────────────────────────────────────────────
+
+def add_discovery(content: str, source: str = "") -> None:
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO discoveries (content, source, created_at) VALUES (?, ?, ?)",
+            (content, source, datetime.now().isoformat()),
+        )
+
+
+def get_recent_discoveries(limit: int = 15) -> list[str]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT content FROM discoveries ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [row["content"] for row in rows]
+
+
+def trim_discoveries(keep: int = 40) -> None:
+    with _conn() as c:
+        c.execute(
+            "DELETE FROM discoveries WHERE id NOT IN "
+            "(SELECT id FROM discoveries ORDER BY created_at DESC LIMIT ?)",
+            (keep,),
+        )
+
+
+def discoveries_count() -> int:
+    with _conn() as c:
+        return c.execute("SELECT COUNT(*) FROM discoveries").fetchone()[0]

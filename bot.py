@@ -379,10 +379,14 @@ async def cmd_update(message: Message) -> None:
     try:
         loop = asyncio.get_event_loop()
         count = await loop.run_in_executor(executor, run_update_sync, client)
-        total = db.discoveries_count()
+        if count == 0:
+            await message.answer("Ничего нового не нашёл. Попробуй позже.")
+            return
+        fresh = db.get_recent_discoveries(limit=count)
+        items = "\n".join(fresh)
         await message.answer(
-            f"✅ Готово! Нашёл *{count}* новых советов.\n"
-            f"Всего в базе: {total} находок.",
+            f"✅ *Нашёл {count} новых советов:*\n\n{items}\n\n"
+            f"_Всего в базе: {db.discoveries_count()}_",
             parse_mode="Markdown",
         )
     except Exception as e:
